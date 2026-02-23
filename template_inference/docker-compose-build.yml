@@ -17,7 +17,7 @@ services:
       - ./cert:/etc/certificates
       - ./log.ini:/config/log.ini
       - ./model/:/model
-      - ./vocab/vocab.json:/model/vocab.json
+      - ./model/vocab.json:/model/vocab.json
     deploy:
       resources:
         reservations:

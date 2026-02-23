@@ -29,6 +29,7 @@ class NLPSentimentPipeline:
         """Initialize the pipeline by loading the appropriate model and tokenizer"""
         self.model = RNNClassifier(25002, 100, 64, 1, 0.5)
         self.model.load_state_dict(torch.load(self._model_params))
+        self.model.to(self._device)
         with open('/model/vocab.json') as json_data:
             self._vocab = json.load(json_data)
 
@@ -63,7 +64,7 @@ class NLPSentimentPipeline:
 
         # 5. Predizione
         with torch.no_grad():
-            prediction = self._model(tensor)
+            prediction = self.model(tensor)
 
         # Restituiamo i valori float (da 0 a 1)
-        return prediction.item()
+        return prediction.squeeze(1).detach().cpu().numpy().tolist()
