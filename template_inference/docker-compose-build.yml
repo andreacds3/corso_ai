@@ -1,0 +1,27 @@
+services:
+
+  web:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    container_name: sentiment_analysis
+    ports:
+      - "8483:8443"
+    environment:
+      - CONFIGURATION_FILE=/config/configuration.yml
+      #- API-KEY=9e572af0-4074-4d8a-853a-7029124a752e
+    command: uvicorn main:app --host 0.0.0.0 --port 8443 --log-level 'debug' --ssl-certfile /etc/certificates/cert.pem --ssl-keyfile /etc/certificates/key.pem
+    restart: always
+    volumes:
+      - ./configuration.yml:/config/configuration.yml
+      - ./cert:/etc/certificates
+      - ./log.ini:/config/log.ini
+      - ./model/:/model
+      - ./vocab/vocab.json:/model/vocab.json
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]

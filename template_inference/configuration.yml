@@ -1,0 +1,4 @@
+batch: true
+batch_size: 4
+batch_timeout: 0.5
+device: cuda
