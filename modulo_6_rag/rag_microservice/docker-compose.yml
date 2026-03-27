@@ -1,0 +1,30 @@
+services:
+
+  rag:
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    container_name: rag
+    environment:
+      - GEMINI_API_KEY=
+    command: uvicorn app:app --host 0.0.0.0 --port 443
+    restart: always
+    ports:
+      - "8443:443"
+
+    volumes:
+      - ../fastembed_cache:/tmp/fastembed_cache
+      - ../models/:/root/.cache/datalab/models
+      - ../huggingface_cache:/root/.cache/huggingface
+    networks:
+      - rag
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
+networks:
+  rag:
+    external: true
