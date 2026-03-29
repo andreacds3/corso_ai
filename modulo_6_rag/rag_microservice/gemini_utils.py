@@ -13,7 +13,7 @@ class KeyPoints(BaseModel):
     keypoints: List[str]
 
 class Insights(BaseModel):
-    insights: List
+    insights: List[str]
 
 class Entities(BaseModel):
     entities: List[str]
@@ -119,7 +119,7 @@ def ask_gemini_to_extract_keypoints(section: str):
                 response_mime_type='application/json',
             response_schema=KeyPoints)
     )
-    return result
+    return result.parsed
 
 def ask_gemini_to_extract_insights(keypoints: List[KeyPoints]):
     system_message = """    You are an helpful and skilled analyst, and you are very good in creating valuable insight form a list of given key points extracted from a pdf file. 
@@ -203,7 +203,7 @@ def ask_gemini_to_extract_entities(text: str):
     return result.parsed
 
 def ask_gemini_to_rewrite_the_query_in_affirmative_way(query: str):
-    system_message = """You are an AI language model assistant. Your task is to generate an alternative affirmative version of the given query to be processed by a RAG system"""
+    system_message = """You are an AI language model assistant. Your task is to generate ONLY ONE alternative affirmative version in Italian of the given query to be processed by a RAG system. Don't add any comment or explanation. Just rewrite the query in plain text"""
     prompt_template = """Please rewrite the following query.
     query: {{query}}
     \n\n"""

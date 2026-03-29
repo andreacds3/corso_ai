@@ -6,7 +6,7 @@ services:
       dockerfile: ./Dockerfile
     container_name: rag
     environment:
-      - GEMINI_API_KEY=
+      - GEMINI_API_KEY=AIzaSyBN2U4pbWhgiasB3-Vqy6jcw4aV8fLeAzI
     command: uvicorn app:app --host 0.0.0.0 --port 443
     restart: always
     ports:
@@ -16,6 +16,7 @@ services:
       - ../fastembed_cache:/tmp/fastembed_cache
       - ../models/:/root/.cache/datalab/models
       - ../huggingface_cache:/root/.cache/huggingface
+      - .:/usr/src/app/
     networks:
       - rag
     deploy:
@@ -25,6 +26,14 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [ gpu ]
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    ports:
+      - "4317:4317"
+      - "6006:6006"
+    networks:
+      - rag
 networks:
   rag:
     external: true

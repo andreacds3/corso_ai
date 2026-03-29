@@ -20,6 +20,12 @@ from gemini_utils import (ask_gemini_to_reconcile_tables, ask_gemini_to_describe
                           ask_gemini_to_extract_abstract, ask_gemini_to_extract_entities, ask_gemini_to_rewrite_the_query_in_affirmative_way, ask_gemini_to_answer_query)
 from langchain_text_splitters import MarkdownHeaderTextSplitter
 from transformers import AutoModel
+from phoenix.otel import register
+from opentelemetry.trace import Status, StatusCode
+import torch
+from marker.config.parser import ConfigParser
+phoenix_project_name = "pdf-rag"
+
 
 API_DESCRIPTION = """
 App to recover data from a rag pipeline
@@ -30,7 +36,12 @@ class IndexingRequest(BaseModel):
     file_content: str
 
 COLLECTION_NAME = 'pdf'
+phoenix_project_name = "pdf_rag"
 
+# With phoenix, we just need to register to get the tracer provider with the appropriate endpoint.
+endpoint = "http://phoenix:6006/v1/traces"
+tracer_provider_phoenix = register(project_name=phoenix_project_name, endpoint=endpoint, auto_instrument=True)
+tracer = tracer_provider_phoenix.get_tracer(__name__)
 
 def create_app() -> FastAPI:
     """
@@ -46,24 +57,37 @@ def create_app() -> FastAPI:
         :param app: the fastapi app
         :return: None
         """
-        dense_embedding_model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2", cache_dir='/tmp/fastembed_cache')
-        bm25_embedding_model = SparseTextEmbedding("Qdrant/bm25", cache_dir='/tmp/fastembed_cache')
-        late_interaction_embedding_model = LateInteractionTextEmbedding("colbert-ir/colbertv2.0", cache_dir='/tmp/fastembed_cache')
+        dense_embedding_model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2", cache_dir='/tmp/fastembed_cache', providers=["CPUExecutionProvider"])
+        bm25_embedding_model = SparseTextEmbedding("Qdrant/bm25", cache_dir='/tmp/fastembed_cache', providers=["CPUExecutionProvider"])
+        late_interaction_embedding_model = LateInteractionTextEmbedding("colbert-ir/colbertv2.0", cache_dir='/tmp/fastembed_cache', providers=["CPUExecutionProvider"])
         client = qdrant_client.QdrantClient('http://vector_store:6333', timeout=1000)
+        config = {
+            "torch_device": "cpu"
 
-        state_dict['pdf_processor'] = PdfConverter(artifact_dict=create_model_dict())
-        state_dict['table_processor'] = TableConverter(artifact_dict=create_model_dict())
+        }
+        config_parser = ConfigParser(config)
+        artifacts = create_model_dict()
+
+        state_dict['pdf_processor'] = PdfConverter(artifact_dict=artifacts, config=config_parser.generate_config_dict())
+        state_dict['table_processor'] = TableConverter(artifact_dict=artifacts, config=config_parser.generate_config_dict())
         state_dict['dense_embedding_model'] = dense_embedding_model
         state_dict['bm25_embedding_model'] = bm25_embedding_model
         state_dict['late_interaction_embedding_model'] = late_interaction_embedding_model
         state_dict['qdrant_client'] = client
         model = AutoModel.from_pretrained(
             'jinaai/jina-reranker-v3',
-            dtype="auto",
+            torch_dtype=torch.bfloat16,  # Fondamentale: dimezza l'uso di VRAM e accelera il calcolo
             trust_remote_code=True,
+            attn_implementation="sdpa"
         )
-        model.to('cuda')
+        if torch.cuda.is_available():
+            device = torch.device('cuda')
+        else:
+            device = torch.device('cpu')
+        model.to(device)
         state_dict['model'] = model
+
+
         yield
 
 
@@ -93,11 +117,14 @@ def create_app() -> FastAPI:
         table_processor = state_dict['table_processor']
         file_location = os.path.join('/tmp', document.file_name)
         with open(file_location, 'wb') as temporary_file:
-            temporary_file.write(base64.b64decode(document.file.encode()))
+            temporary_file.write(base64.b64decode(document.file_content))
         pdf_rendered = pdf_processor(file_location)
         table_rendered = table_processor(file_location)
         text, _, images = text_from_rendered(pdf_rendered)
+        print("text extracted")
         tables, _, images = text_from_rendered(table_rendered)
+        print("tables extracted")
+
         tables_splitted = tables.split('\n\n')
 
         #STEP 2: Riconciliazione tabelle
@@ -115,6 +142,7 @@ def create_app() -> FastAPI:
         if not result.result:
             new_tables.append(tables_splitted[index + 1])
         tables_splitted = list(new_tables)
+        print("tables merged")
 
         #STEP 3: descrizione tabelle
         for table in tables_splitted:
@@ -131,16 +159,20 @@ def create_app() -> FastAPI:
         keypoints = []
         for sezione in sezioni:
             keypoints.append(ask_gemini_to_extract_keypoints(sezione))
-
+        print("Keypoint extracted")
         insights = ask_gemini_to_extract_insights(keypoints)
+        print("Insights extracted")
 
         abstract = ask_gemini_to_extract_abstract(insights)
+        print("Abstract extracted")
+
         documenti_da_encodare = sezioni + ['\n\n'.join(key.keypoints) for key in keypoints] + [
             '\n\n'.join(insights.insights)] + [abstract]
 
         entitized_docs = dict()
         for doc in documenti_da_encodare:
             entitized_docs[doc] = ask_gemini_to_extract_entities(doc).entities
+        print("Entities extracted")
 
         dense_embedding_model = state_dict['dense_embedding_model']
         bm25_embedding_model = state_dict['bm25_embedding_model']
@@ -163,87 +195,151 @@ def create_app() -> FastAPI:
                 payload={"document": doc, "metadata": {"entities": entitized_docs[doc]}}
             )
             points.append(point)
-
-        operation_info = qdrant_client.upsert(
-            collection_name=COLLECTION_NAME,
-            points=points
-        )
+        for point in points:
+            operation_info = qdrant_client.upsert(
+                collection_name=COLLECTION_NAME,
+                points=[point]
+            )
         return operation_info
 
     @app.post('/rest/async/rag')
-    async def index(query: str):
+    async def rag(query: str):
+
+
+        rewrited_query = rewrite_query(query)
+        entities = extract_entities(rewrited_query)
+        dense_embeddings, bm25_embeddings, late_interaction_embeddings = encode_query(rewrited_query)
+        results = retrieve(query,dense_embeddings, bm25_embeddings, late_interaction_embeddings, entities)
+        reranked_result = rerank(query, results)
+        answer_gemini = answer(query, reranked_result)
+        return answer_gemini
+
+
+        return {"risposta": answer, "documenti": [result['document'] for result in reranked_results]}
+
+    @tracer.chain
+    def rewrite_query(query):
         rewrited_query = ask_gemini_to_rewrite_the_query_in_affirmative_way(query)
-        entities = ask_gemini_to_extract_entities(rewrited_query).entities
+        return rewrited_query
+
+    @tracer.chain
+    def extract_entities(query):
+        entities = ask_gemini_to_extract_entities(query).entities
+        return entities
+
+    @tracer.chain
+    def encode_query(query):
         dense_embedding_model = state_dict['dense_embedding_model']
         bm25_embedding_model = state_dict['bm25_embedding_model']
         late_interaction_embedding_model = state_dict['late_interaction_embedding_model']
         dense_embeddings = list(dense_embedding_model.embed(query))[0]
         bm25_embeddings = list(bm25_embedding_model.embed(query))[0]
         late_interaction_embeddings = list(late_interaction_embedding_model.embed(query))[0]
+        return dense_embeddings, bm25_embeddings, late_interaction_embeddings
 
-        prefetch = [
-            models.Prefetch(
-                query=dense_embeddings,
-                using="dense",
-                limit=20,
-            ),
-            models.Prefetch(
-                query=models.SparseVector(**bm25_embeddings.as_object()),
-                using="bm25",
-                limit=20,
-            ),
-        ]
+    def retrieve(query, dense_embeddings, bm25_embeddings, late_interaction_embeddings, entities):
+        with tracer.start_as_current_span("retrieving_documents", openinference_span_kind='retriever') as span:
+            # Log the event of starting retrieval
+            span.add_event("Starting retrieve")
+            # Record the input query as an attribute for visibility
+            # Phoenix allows you to use span.set_input
+            span.set_input(query)
+            try:
+                prefetch = [
+                    models.Prefetch(
+                        query=dense_embeddings,
+                        using="dense",
+                        limit=20,
+                    ),
+                    models.Prefetch(
+                        query=models.SparseVector(**bm25_embeddings.as_object()),
+                        using="bm25",
+                        limit=20,
+                    ),
+                ]
+                client = state_dict['qdrant_client']
+                results = client.query_points(
+                    "pdf",
+                    prefetch=prefetch,
+                    query=late_interaction_embeddings,
+                    using="colbert",
+                    with_payload=True,
+                    limit=10,
+                )
 
-        results = qdrant_client.query_points(
-            "pdf",
-            prefetch=prefetch,
-            query=late_interaction_embeddings,
-            using="colbert",
-            with_payload=True,
-            limit=10,
-        )
+                results_no_entity = [res for res in results.points]
 
-        results_no_entity = [res.payload['document'] for res in results.points]
+                prefetch = [
+                    models.Prefetch(
+                        query=dense_embeddings,
+                        using="dense",
+                        limit=20,
+                        filter=models.Filter(should=create_should_clause(entities))
+                    ),
+                    models.Prefetch(
+                        query=models.SparseVector(**bm25_embeddings.as_object()),
+                        using="bm25",
+                        limit=20,
+                        filter=models.Filter(should=create_should_clause(entities))
+                    ),
+                ]
 
-        def create_should_clause(entities: List[str]):
-            should = []
-            for entity in entities:
-                should.append(models.FieldCondition(key='metadata.entities[]', match=models.MatchText(text=entity)))
-            return should
+                results = client.query_points(
+                    "pdf",
+                    prefetch=prefetch,
+                    query=late_interaction_embeddings,
+                    using="colbert",
+                    with_payload=True,
+                    limit=10,
+                )
+                results_entity = [res for res in results.points]
 
-        prefetch = [
-            models.Prefetch(
-                query=dense_embeddings,
-                using="dense",
-                limit=20,
-                filter=models.Filter(should=create_should_clause(entities))
-            ),
-            models.Prefetch(
-                query=models.SparseVector(**bm25_embeddings.as_object()),
-                using="bm25",
-                limit=20,
-                filter=models.Filter(should=create_should_clause(entities))
-            ),
-        ]
+                retrieved_docs = results_entity + results_no_entity
+                retrieved_docs_ids = list(set([doc.id for doc in retrieved_docs]))
+                # Record details about each retrieved document
+                for i, id_ in enumerate(retrieved_docs_ids):
+                    span.set_attribute(f"retrieval.documents.{i}.document.id", id_)
+                    span.set_attribute(f"retrieval.documents.{i}.document.content", [doc.payload['document'] for doc in retrieved_docs if doc.id == id_][0])
+                    #span.set_attribute(f"retrieval.documents.{i}.document.metadata", doc.payload['metadata']['entities'])
+            except Exception as e:
+                span.set_status(Status(StatusCode.ERROR, str(e)))
+                span.set_attribute("error.type", type(e).__name__)
+                span.set_attribute("error.message", str(e))
+                raise
 
-        results = await qdrant_client.query_points(
-            "pdf",
-            prefetch=prefetch,
-            query=late_interaction_embeddings,
-            using="colbert",
-            with_payload=True,
-            limit=10,
-        )
-        results_entity = [res.payload['document'] for res in results.points]
+            # Mark the span as successful if no error was raised
+            span.set_status(Status(StatusCode.OK))
+            return [doc.payload['document'] for doc in retrieved_docs]
 
-        results = set(results_entity + results_no_entity)
+    @tracer.chain
+    def rerank(query, documents):
         model = state_dict['model']
         model.eval()
-        results = model.rerank(rewrited_query, list(results))
-        reranked_results = results[:5]
-        answer = ask_gemini_to_answer_query(rewrited_query, reranked_results)
-        return answer
+        device = next(model.parameters()).device
+        print(f"Il modello è su: {device}")
 
+        with torch.no_grad():
+            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                # Limita max_length! Se i tuoi documenti sono lunghi,
+                # il tempo cresce in modo quadratico.
+                results = model.rerank(
+                    query,
+                    documents,
+                )
+
+        return results[:5]
+
+    @tracer.chain
+    def answer(query, documents):
+        answer_gemini = ask_gemini_to_answer_query(query, [result['document'] for result in documents])
+        return answer_gemini
+
+
+    def create_should_clause(entities: List[str]):
+        should = []
+        for entity in entities:
+            should.append(models.FieldCondition(key='metadata.entities[]', match=models.MatchText(text=entity)))
+        return should
 
     return app
 
