@@ -16,8 +16,11 @@ from marker.models import create_model_dict
 from marker.output import text_from_rendered
 from typing import List
 from fastembed import TextEmbedding, SparseTextEmbedding, LateInteractionTextEmbedding
+from fastapi.responses import StreamingResponse
+
 from gemini_utils import (ask_gemini_to_reconcile_tables, ask_gemini_to_describe_table, ask_gemini_to_extract_keypoints, ask_gemini_to_extract_insights,
-                          ask_gemini_to_extract_abstract, ask_gemini_to_extract_entities, ask_gemini_to_rewrite_the_query_in_affirmative_way, ask_gemini_to_answer_query)
+                          ask_gemini_to_extract_abstract, ask_gemini_to_answer_query_stream,
+                          ask_gemini_to_extract_entities, ask_gemini_to_rewrite_the_query_in_affirmative_way, ask_gemini_to_answer_query)
 from langchain_text_splitters import MarkdownHeaderTextSplitter
 from transformers import AutoModel
 from phoenix.otel import register
@@ -214,8 +217,15 @@ def create_app() -> FastAPI:
         answer_gemini = answer(query, reranked_result)
         return answer_gemini
 
-
-        return {"risposta": answer, "documenti": [result['document'] for result in reranked_results]}
+    @app.post('/rest/async/rag_streaming')
+    async def rag_streaming(query: str):
+        rewrited_query = rewrite_query(query)
+        entities = extract_entities(rewrited_query)
+        dense_embeddings, bm25_embeddings, late_interaction_embeddings = encode_query(rewrited_query)
+        results = retrieve(query, dense_embeddings, bm25_embeddings, late_interaction_embeddings, entities)
+        reranked_result = rerank(query, results)
+        answer_gemini = answer_stream(query, reranked_result)
+        return StreamingResponse(answer_gemini)
 
     @tracer.chain
     def rewrite_query(query):
@@ -334,6 +344,10 @@ def create_app() -> FastAPI:
         answer_gemini = ask_gemini_to_answer_query(query, [result['document'] for result in documents])
         return answer_gemini
 
+    @tracer.chain
+    def answer_stream(query, documents):
+        for chunk in ask_gemini_to_answer_query_stream(query, [result['document'] for result in documents]):
+            yield chunk
 
     def create_should_clause(entities: List[str]):
         should = []

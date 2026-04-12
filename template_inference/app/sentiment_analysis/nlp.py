@@ -27,7 +27,7 @@ class NLPSentimentPipeline:
 
     def initialize(self) -> None:
         """Initialize the pipeline by loading the appropriate model and tokenizer"""
-        self.model = RNNClassifier(25002, 100, 64, 1, 0.5)
+        self.model = RNNClassifier(25002, 100, 32, 1, 0.5)
         self.model.load_state_dict(torch.load(self._model_params))
         self.model.to(self._device)
         with open('/model/vocab.json') as json_data:

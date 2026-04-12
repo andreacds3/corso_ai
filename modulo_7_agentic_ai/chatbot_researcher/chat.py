@@ -61,6 +61,7 @@ def chat(message, history, system_message):
     response_buffer = ""
     thinking_complete = False
 
+
     for chunk in client.models.generate_content_stream(
             model=GEMINI_MODEL,
             contents=content_list,
@@ -68,7 +69,8 @@ def chat(message, history, system_message):
                 system_instruction=system_message,
                 temperature=0.3,
                 thinking_config=types.ThinkingConfig(include_thoughts=True)
-            )
+            ),
+        tools=[]
     ):
         for part in chunk.candidates[0].content.parts:
             for part in chunk.candidates[0].content.parts:

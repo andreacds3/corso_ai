@@ -252,3 +252,28 @@ def ask_gemini_to_answer_query(query: str, documents: List[str]):
                 temperature=0.3)
     )
     return result.text
+
+def ask_gemini_to_answer_query_stream(query: str, documents: List[str]):
+    system_message = """You are an excellent AI assitant that answer user queries given relevant documents. The documents are sorted by relevance (higher means more relevant).
+    Rispondi solo con affermazioni fattuali basati sui documenti recuperati.
+    Cita le tue fonti alla fine di ogni frase utilizzando [1], [2] ecc
+    """
+    prompt_template = """Answer the given query using the given context documents: \n\nQUERY: {{query}}. \n\nDOCUMENTS: {{documents}}"""
+    prompt = prompt_template.replace('{{query}}', query).replace('{{documents}}', '\n\n'.join(documents))
+    parts = [
+        types.Part.from_text(text=prompt),
+    ]
+    content_list = [
+        types.Content(
+            role='user',
+            parts=parts
+        )
+    ]
+    for chunk in client.models.generate_content_stream(
+            model=GEMINI_MODEL,
+            contents=content_list,
+            config=types.GenerateContentConfig(
+                system_instruction=system_message,
+                temperature=0.3)
+    ):
+        yield chunk.text
