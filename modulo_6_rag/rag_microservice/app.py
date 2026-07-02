@@ -237,7 +237,6 @@ def create_app() -> FastAPI:
         entities = ask_gemini_to_extract_entities(query).entities
         return entities
 
-    @tracer.chain
     def encode_query(query):
         dense_embedding_model = state_dict['dense_embedding_model']
         bm25_embedding_model = state_dict['bm25_embedding_model']

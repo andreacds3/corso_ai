@@ -6,7 +6,7 @@ services:
       dockerfile: ./Dockerfile
     container_name: rag
     environment:
-      - GEMINI_API_KEY={}
+      - GEMINI_API_KEY=AIzaSyDIzrNgBHchsVObA7vBF5UQN1zbTv5PwJ0
     command: uvicorn app:app --host 0.0.0.0 --port 443
     restart: always
     ports:
